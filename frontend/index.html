@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Anonymous Chat</title>
+<style>
+body { background:#000; color:#0f0; font-family:monospace; padding:20px; }
+.box { border:1px solid #0f0; padding:10px; margin-bottom:10px; }
+.hidden { display:none; }
+#chatBox { height:300px; overflow-y:auto; background:#020; padding:5px; }
+.msg-user { color:#0f0; font-weight:bold; }
+.msg-time { color:#0a0; font-size:0.8em; }
+.msg-text { white-space:pre-wrap; }
+input,textarea { background:#000; color:#0f0; border:1px solid #0f0; padding:4px; }
+button { background:#0f0; color:#000; border:none; padding:6px 12px; cursor:pointer; }
+button:disabled { background:#333; color:#777; }
+.tab { display:inline-block; padding:4px 8px; border:1px solid #0f0; cursor:pointer; }
+.tab.active { background:#0f0; color:#000; }
+.file-item { border-bottom:1px solid #060; padding:4px 0; display:flex; justify-content:space-between; }
+</style>
+</head>
+<body>
+
+<h2>Anonymous Chat</h2>
+<div class="box">Drop the Goods</div>
+
+<div id="usernameBox" class="box">
+  Username: <input id="usernameInput" maxlength="50">
+  <button id="enterBtn">Enter</button>
+</div>
+
+<div id="mainBox" class="hidden">
+  <div>
+    <span id="tabChat" class="tab active">Chat</span>
+    <span id="tabFiles" class="tab">Files</span>
+  </div>
+
+  <div id="onlineUsers"></div>
+
+  <div id="chatTab" class="box">
+    <div id="chatBox"></div>
+    <textarea id="msgInput" rows="2"></textarea>
+    <button id="sendBtn">Send</button>
+  </div>
+
+  <div id="filesTab" class="box hidden">
+    <input type="file" id="fileInput">
+    <button id="uploadBtn">Upload</button>
+    <div id="uploadStatus"></div>
+    <div id="fileList"></div>
+  </div>
+
+  <div class="box">
+    <span id="userLabel"></span> |
+    <span id="msgCount">0</span> messages |
+    <span id="fileCount">0</span> files
+  </div>
+</div>
+
+<script>
+function autoScroll() {
+  const box = document.getElementById("chatBox");
+  const threshold = 80; // px from bottom to still autoscroll
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
+
+  if (atBottom) {
+    box.scrollTop = box.scrollHeight;
+  }
+}
+let username="", socket=null, sessionId=null, hasHistory=false;
+
+function initWS(){
+  const proto=location.protocol==="https:"?"wss":"ws";
+  socket=new WebSocket(`${proto}://${location.host}/ws`);
+
+  socket.onopen=()=>{
+    sessionId=localStorage.getItem("chat_session")||crypto.randomUUID();
+    localStorage.setItem("chat_session",sessionId);
+    socket.send(JSON.stringify({type:"join",username,sessionId}));
+  };
+
+  socket.onmessage=e=>{
+    const p=JSON.parse(e.data);
+
+    if(p.type==="history"&&!hasHistory){
+      hasHistory=true;
+      renderMessages(p.data);
+    }
+
+    if(p.type==="message"){
+      appendMessage(p.data);
+    }
+
+    if(p.type==="user_list"){
+      document.getElementById("onlineUsers").textContent="Online: "+p.data.join(", ");
+    }
+  };
+
+  socket.onclose=()=>setTimeout(initWS,2000);
+}
+
+function renderMessages(msgs) {
+  const box = document.getElementById("chatBox");
+  box.innerHTML = "";
+  msgs.forEach(m => appendMessage(m, false));
+  document.getElementById("msgCount").textContent = msgs.length;
+  box.scrollTop = box.scrollHeight; // always scroll on initial load
+}
+
+function appendMessage(m, inc = true) {
+  const div = document.createElement("div");
+  div.innerHTML = `
+    <span class="msg-user">${m.username}</span>
+    <span class="msg-time">| ${new Date(m.timestamp).toLocaleString()}</span>
+    <div class="msg-text">${m.text}</div>
+  `;
+  const box = document.getElementById("chatBox");
+  box.appendChild(div);
+
+  if (inc) {
+    document.getElementById("msgCount").textContent++;
+  }
+
+  autoScroll();
+}
+
+async function loadFiles(){
+  const res=await fetch("/api/files");
+  const files=await res.json();
+  const list=document.getElementById("fileList");
+  list.innerHTML="";
+  files.forEach(f=>{
+    const row=document.createElement("div");
+    row.className="file-item";
+    row.innerHTML=`${f.originalName} (${Math.round(f.size/1024)} KB)
+                   <button onclick="location='/api/download/${f.filename}'">Download</button>`;
+    list.appendChild(row);
+  });
+  document.getElementById("fileCount").textContent=files.length;
+}
+
+document.getElementById("enterBtn").onclick=()=>{
+  username=document.getElementById("usernameInput").value.trim();
+  if(!username) return alert("Enter username");
+
+  document.getElementById("usernameBox").classList.add("hidden");
+  document.getElementById("mainBox").classList.remove("hidden");
+  document.getElementById("userLabel").textContent="User: "+username;
+
+  loadFiles();
+  initWS();
+};
+
+document.getElementById("sendBtn").onclick=()=>{
+  const text=document.getElementById("msgInput").value.trim();
+  if(!text||socket.readyState!==1) return;
+  socket.send(JSON.stringify({type:"message",username,text}));
+  document.getElementById("msgInput").value="";
+};
+// Pressing Enter sends the message (Shift+Enter makes a new line)
+document.getElementById("msgInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById("sendBtn").click();
+  }
+});
+document.getElementById("uploadBtn").onclick=async()=>{
+  const file=document.getElementById("fileInput").files[0];
+  if(!file) return;
+  const fd=new FormData();
+  fd.append("file",file);
+  fd.append("username",username);
+  const res=await fetch("/api/upload",{method:"POST",body:fd});
+  document.getElementById("uploadStatus").textContent=res.ok?"Uploaded":"Error";
+  loadFiles();
+};
+
+document.getElementById("tabChat").onclick=()=>{
+  document.getElementById("tabChat").classList.add("active");
+  document.getElementById("tabFiles").classList.remove("active");
+  document.getElementById("chatTab").classList.remove("hidden");
+  document.getElementById("filesTab").classList.add("hidden");
+};
+
+document.getElementById("tabFiles").onclick=()=>{
+  document.getElementById("tabFiles").classList.add("active");
+  document.getElementById("tabChat").classList.remove("active");
+  document.getElementById("filesTab").classList.remove("hidden");
+  document.getElementById("chatTab").classList.add("hidden");
+};
+</script>
+
+</body>
+</html>
